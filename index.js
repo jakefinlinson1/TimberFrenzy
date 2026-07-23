@@ -1,32 +1,46 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
 
-const {setGlobalOptions} = require("firebase-functions");
-const {onRequest} = require("firebase-functions/https");
-const logger = require("firebase-functions/logger");
+// Initialize admin privileges to securely bypass standard database rules
+admin.initializeApp();
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({ maxInstances: 10 });
+exports.verifyAdReward = functions.https.onRequest(async (req, res) => {
+  // 1. Extract the data AdMob sends in the background URL ping
+  const { custom_data, reward_amount } = req.query;
 
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
+  // AdMob requires a 200 OK response even if it fails, otherwise it keeps retrying
+  if (!custom_data) {
+    console.error("Missing custom_data (Player ID)");
+    return res.status(200).send("Failed: No Player ID provided.");
+  }
 
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+  try {
+    // 2. The custom_data is the exact Player ID you pass from the game
+    const playerId = custom_data;
+    const amount = parseInt(reward_amount, 10) || 10; // Default to 10 gems/coins
+
+    // 3. Target the specific player's document in Firestore
+    const playerRef = admin.firestore().collection("players").doc(playerId);
+
+    // 4. Securely add the reward to their account
+    await admin.firestore().runTransaction(async (transaction) => {
+      const doc = await transaction.get(playerRef);
+      
+      if (!doc.exists) {
+        // If the player doesn't exist yet, create them and add the reward
+        transaction.set(playerRef, { gems: amount });
+      } else {
+        // If they do exist, add the new reward to their current balance
+        const currentGems = doc.data().gems || 0;
+        transaction.update(playerRef, { gems: currentGems + amount });
+      }
+    });
+
+    // 5. Tell AdMob the reward was successfully processed
+    res.status(200).send("Reward verified and granted successfully.");
+
+  } catch (error) {
+    console.error("Database transaction failed:", error);
+    res.status(500).send("Internal Server Error");
+  }
+});
